@@ -1,3 +1,6 @@
+# Triage telemetry (local only)
+multi-agent-pipeline/triage_log.csv
+
 # Secrets
 multi-agent-pipeline/.env
 .claude/settings.local.json

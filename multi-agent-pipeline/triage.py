@@ -10,9 +10,11 @@ Classification tiers:
   deep    — cross-checking, high-stakes decisions, multi-model needed
 """
 
+import csv
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -64,6 +66,15 @@ def main():
         sys.exit(0)
 
     tier = classify(prompt)
+
+    log_path = Path(__file__).parent / "triage_log.csv"
+    write_header = not log_path.exists()
+    with log_path.open("a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if write_header:
+            w.writerow(["timestamp", "tier", "prompt_preview"])
+        w.writerow([datetime.now(timezone.utc).isoformat(), tier, prompt[:80]])
+
     print(f"[TRIAGE:{tier.upper()}] {ROUTING[tier]}", flush=True)
 
 
