@@ -12,6 +12,7 @@ Classification tiers:
 
 import csv
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -50,12 +51,16 @@ Reply with ONLY the one classification word."""
         ["claude", "-p", classify_prompt, "--model", HAIKU],
         capture_output=True,
         text=True,
+        env={**os.environ, "TRIAGE_ACTIVE": "1"},
     )
     word = result.stdout.strip().lower().split()[0] if result.stdout.strip() else ""
     return word if word in VALID else "complex"
 
 
 def main():
+    if os.environ.get("TRIAGE_ACTIVE"):
+        sys.exit(0)  # Prevent recursive hook invocation from inner claude -p calls
+
     try:
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
