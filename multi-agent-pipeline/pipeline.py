@@ -246,6 +246,30 @@ def _divider(label: str):
     print(f"\n{'─' * 60}\n  {label}\n{'─' * 60}")
 
 
+def _snippet(text: str, chars: int = 120) -> str:
+    text = text.strip().replace("\n", " ")
+    return text[:chars] + "…" if len(text) > chars else text
+
+
+def _print_model_summary(result: dict, mode: str):
+    print(f"\n{'═' * 60}")
+    print("  MULTI-MODEL SUMMARY")
+    print(f"{'═' * 60}")
+    if mode == "review":
+        print(f"  Haiku  (planner)  → {_snippet(result['plan'])}")
+        print(f"  Codex  (code)     → {_snippet(result['code_review'])}")
+        print(f"  Sonnet (arch)     → {_snippet(result['arch_review'])}")
+        verdict = result["final"].strip().rsplit("\n", 1)[-1]
+        print(f"  Haiku  (verdict)  → {_snippet(verdict)}")
+    else:
+        print(f"  Haiku  (draft)    → {_snippet(result['draft'])}")
+        print(f"  Codex  (code)     → {_snippet(result['code_critique'])}")
+        print(f"  Sonnet (reason)   → {_snippet(result['reasoning_critique'])}")
+        verdict = result["final"].strip().rsplit("\n", 1)[-1]
+        print(f"  Haiku  (verdict)  → {_snippet(verdict)}")
+    print(f"{'═' * 60}\n")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -263,6 +287,7 @@ if __name__ == "__main__":
     if args.mode == "validate":
         result = run_validate(args.task)
 
+        _print_model_summary(result, "validate")
         _divider("FINAL ANSWER  (Haiku merger)")
         print(result["final"])
 
@@ -283,6 +308,7 @@ if __name__ == "__main__":
 
         result = run(args.task, code)
 
+        _print_model_summary(result, "review")
         _divider("FINAL REVIEW  (Haiku merger)")
         print(result["final"])
 
