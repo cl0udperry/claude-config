@@ -4,19 +4,20 @@ Multi-agent pipeline — two modes:
 
   review   (default)
     Stage 1: Haiku   — orchestrator / cheap planner
-    Stage 2: Codex   — code reviewer
+    Stage 2: Codex → Opus → Ollama  — advanced code reviewer
     Stage 3: Sonnet  — reasoning + architecture reviewer
     Stage 4: Haiku   — final merger → prioritized findings
 
   validate
     Stage 1: Haiku   — drafts initial answer
-    Stage 2: Codex   — critiques code / implementation details
+    Stage 2: Codex → Opus → Ollama  — critiques code / implementation details
     Stage 3: Sonnet  — critiques reasoning / architecture
     Stage 4: Haiku   — merges → final answer + change summary + unresolved concerns
 
 Requires:
-  - claude CLI authenticated (no Anthropic API key needed)
-  - OPENAI_API_KEY in multi-agent-pipeline/.env
+  - claude CLI authenticated
+  - OPENAI_API_KEY in multi-agent-pipeline/.env  (Codex, optional)
+  - Ollama running locally as final fallback (OLLAMA_MODEL env var, default: llama3.2)
 """
 
 import json
@@ -24,42 +25,73 @@ import os
 import subprocess
 import sys
 import textwrap
+import urllib.request
 from pathlib import Path
 
 from dotenv import load_dotenv
 import openai
 
-# Load .env from this file's directory
 load_dotenv(Path(__file__).parent / ".env")
 
-HAIKU  = "claude-haiku-4-5-20251001"
-CODEX  = "codex-mini-latest"
-SONNET = "claude-sonnet-4-6"
+HAIKU        = "claude-haiku-4-5-20251001"
+OPUS         = "claude-opus-4-7"
+SONNET       = "claude-sonnet-4-6"
+CODEX        = "codex-mini-latest"
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
+OLLAMA_URL   = "http://localhost:11434/api/generate"
 
-_openai = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+_openai = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 
 
 # ── model wrappers ────────────────────────────────────────────────────────────
 
+def _ollama(prompt: str) -> str:
+    payload = json.dumps({"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}).encode()
+    req = urllib.request.Request(OLLAMA_URL, data=payload, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return json.loads(resp.read())["response"].strip()
+
+
 def _claude(model: str, prompt: str) -> str:
-    """Call claude CLI in non-interactive mode."""
     result = subprocess.run(
         ["claude", "-p", prompt, "--model", model],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"claude CLI error:\n{result.stderr.strip()}")
+        err = result.stderr.strip()
+        if any(k in err.lower() for k in ("rate limit", "quota", "overload", "529", "429")):
+            print(f"  [quota exceeded for {model} — falling back to Ollama/{OLLAMA_MODEL}]")
+            return _ollama(prompt)
+        raise RuntimeError(f"claude CLI error:\n{err}")
     return result.stdout.strip()
 
 
-def _codex(prompt: str) -> str:
-    r = _openai.chat.completions.create(
-        model=CODEX,
-        reasoning_effort="medium",
-        messages=[{"role": "user", "content": prompt}],
+def _code_critique(prompt: str) -> str:
+    """Codex → Opus → Ollama cascade for code critique stage."""
+    # 1st choice: Codex
+    try:
+        r = _openai.chat.completions.create(
+            model=CODEX,
+            reasoning_effort="medium",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return r.choices[0].message.content
+    except Exception as e:
+        print(f"  [Codex unavailable ({type(e).__name__}) — trying Opus]")
+
+    # 2nd choice: Opus
+    result = subprocess.run(
+        ["claude", "-p", prompt, "--model", OPUS],
+        capture_output=True, text=True,
     )
-    return r.choices[0].message.content
+    if result.returncode == 0:
+        return result.stdout.strip()
+    err = result.stderr.strip()
+    print(f"  [Opus unavailable — falling back to Ollama/{OLLAMA_MODEL}]")
+
+    # Final fallback: Ollama
+    return _ollama(prompt)
 
 
 # ── pipeline stages ───────────────────────────────────────────────────────────
@@ -87,7 +119,7 @@ def stage_code_review(plan: str, context: str) -> str:
           CRITICAL | MAJOR | MINOR | NIT
 
         {context}""")
-    return _codex(prompt)
+    return _code_critique(prompt)
 
 
 def stage_arch_review(plan: str, context: str) -> str:
@@ -146,7 +178,7 @@ def vstage_code_critique(question: str, draft: str) -> str:
 
         Draft answer:
         {draft}""")
-    return _codex(prompt)
+    return _code_critique(prompt)
 
 
 def vstage_reasoning_critique(question: str, draft: str) -> str:
@@ -202,7 +234,7 @@ def run(task: str, code: str = "") -> dict:
     except json.JSONDecodeError:
         pass  # Non-fatal; pass raw text forward
 
-    print("[2/4] Codex  — code review...")
+    print("[2/4] Codex/Opus — code review...")
     code_review = stage_code_review(plan, context)
 
     print("[3/4] Sonnet — architecture review...")
@@ -223,7 +255,7 @@ def run_validate(question: str) -> dict:
     print("[1/4] Haiku  — drafting answer...")
     draft = vstage_draft(question)
 
-    print("[2/4] Codex  — critiquing code/implementation...")
+    print("[2/4] Codex/Opus — critiquing code/implementation...")
     code_critique = vstage_code_critique(question, draft)
 
     print("[3/4] Sonnet — critiquing reasoning/architecture...")
@@ -257,13 +289,13 @@ def _print_model_summary(result: dict, mode: str):
     print(f"{'═' * 60}")
     if mode == "review":
         print(f"  Haiku  (planner)  → {_snippet(result['plan'])}")
-        print(f"  Codex  (code)     → {_snippet(result['code_review'])}")
+        print(f"  Codex/Opus (code) → {_snippet(result['code_review'])}")
         print(f"  Sonnet (arch)     → {_snippet(result['arch_review'])}")
         verdict = result["final"].strip().rsplit("\n", 1)[-1]
         print(f"  Haiku  (verdict)  → {_snippet(verdict)}")
     else:
         print(f"  Haiku  (draft)    → {_snippet(result['draft'])}")
-        print(f"  Codex  (code)     → {_snippet(result['code_critique'])}")
+        print(f"  Codex/Opus (code) → {_snippet(result['code_critique'])}")
         print(f"  Sonnet (reason)   → {_snippet(result['reasoning_critique'])}")
         verdict = result["final"].strip().rsplit("\n", 1)[-1]
         print(f"  Haiku  (verdict)  → {_snippet(verdict)}")
@@ -294,7 +326,7 @@ if __name__ == "__main__":
         _divider("Draft  (Haiku)")
         print(result["draft"])
 
-        _divider("Code Critique  (Codex)")
+        _divider("Code Critique  (Codex/Opus/Ollama)")
         print(result["code_critique"])
 
         _divider("Reasoning Critique  (Sonnet)")
@@ -315,7 +347,7 @@ if __name__ == "__main__":
         _divider("Orchestration Plan  (Haiku planner)")
         print(result["plan"])
 
-        _divider("Code Review  (Codex)")
+        _divider("Code Review  (Codex/Opus/Ollama)")
         print(result["code_review"])
 
         _divider("Architecture Review  (Sonnet)")
